@@ -47,10 +47,115 @@ sh = logging.StreamHandler()
 sh.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 logger.addHandler(sh)
 
+use_models = ["universal-sentence-encoder-multilingual",
+              "universal-sentence-encoder",
+              "universal-sentence-encoder-large",
+              "universal-sentence-encoder-multilingual-large"]
 
-def default_tokenizer(doc):
-    """Tokenize documents for training and remove too long/short words"""
-    return simple_preprocess(strip_tags(doc), deacc=True)
+use_model_urls = {
+    "universal-sentence-encoder-multilingual": "https://tfhub.dev/google/universal-sentence-encoder-multilingual/3",
+    "universal-sentence-encoder": "https://tfhub.dev/google/universal-sentence-encoder/4",
+    "universal-sentence-encoder-large": "https://tfhub.dev/google/universal-sentence-encoder-large/5",
+    "universal-sentence-encoder-multilingual-large": "https://tfhub.dev/google/universal-sentence-encoder"
+                                                     "-multilingual-large/3 "
+}
+
+sbert_models = ["distiluse-base-multilingual-cased",
+                "all-MiniLM-L6-v2",
+                "paraphrase-multilingual-MiniLM-L12-v2"]
+
+acceptable_embedding_models = use_models + sbert_models
+
+
+def default_tokenizer(document):
+    """Tokenize a document for training and remove too long/short words
+
+    Parameters
+    ----------
+    document: List of str
+        Input document.
+
+    Returns
+    -------
+    tokenized_document: List of str
+        List of tokens.
+
+    """
+    return simple_preprocess(strip_tags(document), deacc=True)
+
+
+def get_chunks(tokens, chunk_length, max_num_chunks, chunk_overlap_ratio):
+    """Split a document into sequential chunks
+
+    Parameters
+    ----------
+    tokens: List of str
+        Input document tokens.
+
+    chunk_length: int
+        Length of each document chunk.
+
+    max_num_chunks: int (Optional, default None)
+        Limit the number of document chunks
+
+    chunk_overlap_ratio: float
+        Fraction of overlapping tokens between sequential chunks.
+
+    Returns
+    -------
+    chunked_document: List of str
+        List of document chunks.
+
+    """
+    num_tokens = len(tokens)
+    if num_tokens == 0:
+        return [""]
+
+    num_chunks = int(np.ceil(num_tokens / chunk_length))
+
+    if max_num_chunks is not None:
+        num_chunks = min(num_chunks, max_num_chunks)
+
+    return [" ".join(tokens[i:i + chunk_length])
+            for i in list(range(0, num_tokens, int(chunk_length * (1 - chunk_overlap_ratio))))[0:num_chunks]]
+
+
+def get_random_chunks(tokens, chunk_length, chunk_len_coverage_ratio, max_num_chunks):
+    """Split a document into chunks starting at random positions
+
+    Parameters
+    ----------
+    tokens: List of str
+        Input document tokens.
+
+    chunk_length: int
+        Length of each document chunk.
+
+    chunk_len_coverage_ratio: float
+        Proportion of token length that will be covered by chunks. Default
+        value of 1.0 means chunk lengths will add up to number of tokens.
+        This does not mean all tokens will be covered.
+
+    max_num_chunks: int (Optional, default None)
+        Limit the number of document chunks
+
+    Returns
+    -------
+    chunked_document: List of str
+        List of document chunks.
+
+    """
+    num_tokens = len(tokens)
+    if num_tokens == 0:
+        return [""]
+
+    num_chunks = int(np.ceil(num_tokens * chunk_len_coverage_ratio / chunk_length))
+
+    if max_num_chunks is not None:
+        num_chunks = min(num_chunks, max_num_chunks)
+
+    starts = np.random.choice(range(0, num_tokens), size=num_chunks)
+    return [" ".join(tokens[i:i + chunk_length]) for i in starts]
 
 
 class Top2Vec:
@@ -62,14 +167,25 @@ class Top2Vec:
 
     Parameters
     ----------
-    embedding_model: string
+    documents: List of str
+        Input corpus, should be a list of strings.
+
+    min_count: int (Optional, default 50)
+        Ignores all words with total frequency lower than this. For smaller
+        corpora a smaller min_count will be necessary.
+
+    embedding_model: string or callable
         This will determine which model is used to generate the document and
         word embeddings. The valid string options are:
 
             * doc2vec
             * universal-sentence-encoder
+            * universal-sentence-encoder-large
             * universal-sentence-encoder-multilingual
+            * universal-sentence-encoder-multilingual-large
             * distiluse-base-multilingual-cased
+            * all-MiniLM-L6-v2
+            * paraphrase-multilingual-MiniLM-L12-v2
 
         For large data sets and data sets with very unique vocabulary doc2vec
         could produce better results. This will train a doc2vec model from
@@ -83,20 +199,27 @@ class Top2Vec:
         covered by the multilingual model. It is also suggested for data sets
         that are multilingual.
 
-        For more information on universal-sentence-encoder visit:
-        https://tfhub.dev/google/universal-sentence-encoder/4
+        For more information on universal-sentence-encoder options visit:
+        https://tfhub.dev/google/collections/universal-sentence-encoder/1
 
-        For more information on universal-sentence-encoder-multilingual visit:
-        https://tfhub.dev/google/universal-sentence-encoder-multilingual/3
+        The SBERT pre-trained sentence transformer options are
+        distiluse-base-multilingual-cased,
+        paraphrase-multilingual-MiniLM-L12-v2, and all-MiniLM-L6-v2.
 
-        The distiluse-base-multilingual-cased pre-trained sentence transformer
-        is suggested for multilingual datasets and languages that are not
+        The distiluse-base-multilingual-cased and
+        paraphrase-multilingual-MiniLM-L12-v2 are suggested for multilingual
+        datasets and languages that are not
         covered by the multilingual universal sentence encoder. The
         transformer is significantly slower than the universal sentence
-        encoder options.
+        encoder options(except for the large options).
 
-        For more informati ond istiluse-base-multilingual-cased visit:
+        For more information on SBERT options visit:
         https://www.sbert.net/docs/pretrained_models.html
+
+        If passing a callable embedding_model note that it will not be saved
+        when saving a top2vec model. After loading such a saved top2vec model
+        the set_embedding_model method will need to be called and the same
+        embedding_model callable used during training must be passed to it.
 
     embedding_model_path: string (Optional)
         Pre-trained embedding models will be downloaded automatically by
@@ -106,12 +229,65 @@ class Top2Vec:
         Warning: the model at embedding_model_path must match the
         embedding_model parameter type.
 
-    documents: List of str
-        Input corpus, should be a list of strings.
+    embedding_batch_size: int (default=32)
+        Batch size for documents being embedded.
 
-    min_count: int (Optional, default 50)
-        Ignores all words with total frequency lower than this. For smaller
-        corpora a smaller min_count will be necessary.
+    split_documents: bool (default False)
+        If set to True, documents will be split into parts before embedding.
+        After embedding the multiple document part embeddings will be averaged
+        to create a single embedding per document. This is useful when documents
+        are very large or when the embedding model has a token limit.
+
+        Document chunking or a senticizer can be used for document splitting.
+
+    document_chunker: string or callable (default 'sequential')
+        This will break the document into chunks. The valid string options are:
+
+            * sequential
+            * random
+
+        The sequential chunker will split the document into chunks of specified
+        length and ratio of overlap. This is the recommended method.
+
+        The random chunking option will take random chunks of specified length
+        from the document. These can overlap and should be thought of as
+        sampling chunks with replacement from the document.
+
+        If a callable is passed it must take as input a list of tokens of
+        a document and return a list of strings representing the resulting
+        document chunks.
+
+        Only one of document_chunker or sentincizer should be used.
+
+    chunk_length: int (default 100)
+        The number of tokens per document chunk if using the document chunker
+        string options.
+
+    max_num_chunks: int (Optional)
+        The maximum number of chunks generated per document if using the
+        document chunker string options.
+
+    chunk_overlap_ratio: float (default 0.5)
+        Only applies to the 'sequential' document chunker.
+
+        Fraction of overlapping tokens between sequential chunks. A value of
+        0 will result i no overlap, where as 0.5 will overlap half of the
+        previous chunk.
+
+    chunk_len_coverage_ratio: float (default 1.0)
+        Only applies to the 'random' document chunker option.
+
+        Proportion of token length that will be covered by chunks. Default
+        value of 1.0 means chunk lengths will add up to number of tokens of
+        the document. This does not mean all tokens will be covered since
+        chunks can be overlapping.
+
+    sentencizer: callable (Optional)
+        A sentincizer callable can be passed. The input should be a string
+        representing the document and the output should be a list of strings
+        representing the document sentence chunks.
+
+        Only one of document_chunker or sentincizer should be used.
 
     speed: string (Optional, default 'learn')
 
@@ -156,6 +332,8 @@ class Top2Vec:
         Override the default tokenization method. If None then
         gensim.utils.simple_preprocess will be used.
 
+        Tokenizer must take a document and return a list of tokens.
+
     use_embedding_model_tokenizer: bool (Optional, default False)
         If using an embedding model other than doc2vec, use the model's
         tokenizer for document embedding. If set to True the tokenizer, either
@@ -177,6 +355,14 @@ class Top2Vec:
                  min_count=50,
                  embedding_model='doc2vec',
                  embedding_model_path=None,
+                 embedding_batch_size=32,
+                 split_documents=False,
+                 document_chunker='sequential',
+                 chunk_length=100,
+                 max_num_chunks=None,
+                 chunk_overlap_ratio=0.5,
+                 chunk_len_coverage_ratio=1.0,
+                 sentencizer=None,
                  speed='learn',
                  use_corpus_file=False,
                  document_ids=None,
@@ -235,11 +421,32 @@ class Top2Vec:
             self.doc_id2index = dict(zip(self.document_ids, list(range(0, len(self.document_ids)))))
             self.doc_id_type = np.int_
 
-        acceptable_embedding_models = ["universal-sentence-encoder-multilingual",
-                                       "universal-sentence-encoder",
-                                       "distiluse-base-multilingual-cased"]
-
         self.embedding_model_path = embedding_model_path
+
+        # validate document splitting
+        use_sentencizer = False
+        custom_chunker = False
+        if split_documents:
+            if document_chunker == 'sequential':
+                document_chunker = get_chunks
+                document_chunker_args = {"chunk_length": chunk_length,
+                                         "max_num_chunks": max_num_chunks,
+                                         "chunk_overlap_ratio": chunk_overlap_ratio}
+
+            elif document_chunker == 'random':
+                document_chunker = get_random_chunks
+                document_chunker_args = {"chunk_length": chunk_length,
+                                         "max_num_chunks": max_num_chunks,
+                                         "chunk_len_coverage_ratio": chunk_len_coverage_ratio}
+
+            elif callable(document_chunker):
+                custom_chunker = True
+            elif sentencizer is None:
+                raise ValueError(f"{document_chunker} is an invalid document chunker.")
+            elif callable(sentencizer):
+                use_sentencizer = True
+            else:
+                raise ValueError(f"{sentencizer} is invalid. Document sentencizer must be callable.")
 
         if embedding_model == 'doc2vec':
 
@@ -292,7 +499,6 @@ class Top2Vec:
                 temp.write(lines)
                 doc2vec_args["corpus_file"] = temp.name
 
-
             else:
                 train_corpus = [TaggedDocument(tokenizer(doc), [i]) for i, doc in enumerate(documents)]
                 doc2vec_args["documents"] = train_corpus
@@ -301,10 +507,15 @@ class Top2Vec:
             self.embedding_model = 'doc2vec'
             self.model = Doc2Vec(**doc2vec_args)
 
+            self.word_vectors = self.model.wv.get_normed_vectors()
+            self.word_indexes = self.model.wv.key_to_index
+            self.vocab = list(self.model.wv.key_to_index.keys())
+            self.document_vectors = self.model.dv.get_normed_vectors()
+
             if use_corpus_file:
                 temp.close()
 
-        elif embedding_model in acceptable_embedding_models:
+        elif (embedding_model in acceptable_embedding_models) or callable(embedding_model):
 
             self.embed = None
             self.embedding_model = embedding_model
@@ -340,11 +551,47 @@ class Top2Vec:
             self.word_vectors = self._l2_normalize(np.array(self.embed(self.vocab)))
 
             # embed documents
-            if use_embedding_model_tokenizer:
-                self.document_vectors = self._embed_documents(documents)
+
+            # split documents
+            if split_documents:
+                if use_sentencizer:
+                    chunk_id = 0
+                    chunked_docs = []
+                    chunked_doc_ids = []
+                    for doc in documents:
+                        doc_chunks = sentencizer(doc)
+                        doc_chunk_ids = [chunk_id] * len(doc_chunks)
+                        chunk_id += 1
+                        chunked_docs.extend(doc_chunks)
+                        chunked_doc_ids.extend(doc_chunk_ids)
+
+                else:
+                    chunk_id = 0
+                    chunked_docs = []
+                    chunked_doc_ids = []
+                    for tokens in tokenized_corpus:
+                        if custom_chunker:
+                            doc_chunks = document_chunker(tokens)
+                        else:
+                            doc_chunks = document_chunker(tokens, **document_chunker_args)
+                        doc_chunk_ids = [chunk_id] * len(doc_chunks)
+                        chunk_id += 1
+                        chunked_docs.extend(doc_chunks)
+                        chunked_doc_ids.extend(doc_chunk_ids)
+
+                chunked_doc_ids = np.array(chunked_doc_ids)
+                document_chunk_vectors = self._embed_documents(chunked_docs, embedding_batch_size)
+                self.document_vectors = self._l2_normalize(
+                    np.vstack([document_chunk_vectors[np.where(chunked_doc_ids == label)[0]]
+                              .mean(axis=0) for label in set(chunked_doc_ids)]))
+
+            # original documents
             else:
-                train_corpus = [' '.join(tokens) for tokens in tokenized_corpus]
-                self.document_vectors = self._embed_documents(train_corpus)
+                if use_embedding_model_tokenizer:
+                    self.document_vectors = self._embed_documents(documents, embedding_batch_size)
+                else:
+                    train_corpus = [' '.join(tokens) for tokens in tokenized_corpus]
+                    self.document_vectors = self._embed_documents(train_corpus, embedding_batch_size)
 
         else:
             raise ValueError(f"{embedding_model} is an invalid embedding model.")
@@ -357,7 +604,7 @@ class Top2Vec:
                          'n_components': 5,
                          'metric': 'cosine'}
 
-        umap_model = umap.UMAP(**umap_args).fit(self._get_document_vectors(norm=False))
+        umap_model = umap.UMAP(**umap_args).fit(self.document_vectors)
 
         # find dense areas of document vectors
         logger.info('Finding dense areas of documents')
@@ -383,7 +630,7 @@ class Top2Vec:
 
         # assign documents to topic
         self.doc_top, self.doc_dist = self._calculate_documents_topic(self.topic_vectors,
-                                                                      self._get_document_vectors())
+                                                                      self.document_vectors)
 
         # calculate topic sizes
         self.topic_sizes = self._calculate_topic_sizes(hierarchy=False)
@@ -425,8 +672,8 @@ class Top2Vec:
         document_index_temp = None
         word_index_temp = None
 
-        # do not save sentence encoders and sentence transformers
-        if self.embedding_model != "doc2vec":
+        # do not save sentence encoders, sentence transformers and custom embedding
+        if self.embedding_model not in ["doc2vec"]:
             self.embed = None
 
         # serialize document index so that it can be saved
@@ -475,12 +722,7 @@ class Top2Vec:
 
             temp = tempfile.NamedTemporaryFile(mode='w+b')
             temp.write(top2vec_model.serialized_document_index)
-
-            if top2vec_model.embedding_model == 'doc2vec':
-                document_vectors = top2vec_model.model.docvecs.vectors_docs
-            else:
-                document_vectors = top2vec_model.document_vectors
-
+            document_vectors = top2vec_model.document_vectors
             top2vec_model.document_index = hnswlib.Index(space='ip',
                                                          dim=document_vectors.shape[1])
             top2vec_model.document_index.load_index(temp.name, max_elements=document_vectors.shape[0])
@@ -497,12 +739,7 @@ class Top2Vec:
 
             temp = tempfile.NamedTemporaryFile(mode='w+b')
             temp.write(top2vec_model.serialized_word_index)
-
-            if top2vec_model.embedding_model == 'doc2vec':
-                word_vectors = top2vec_model.model.wv.vectors
-            else:
-                word_vectors = top2vec_model.word_vectors
-
+            word_vectors = top2vec_model.word_vectors
             top2vec_model.word_index = hnswlib.Index(space='ip',
                                                      dim=word_vectors.shape[1])
             top2vec_model.word_index.load_index(temp.name, max_elements=word_vectors.shape[0])
@@ -519,27 +756,31 @@ class Top2Vec:
         else:
             return normalize(vectors.reshape(1, -1))[0]
 
-    def _embed_documents(self, train_corpus):
+    def _embed_documents(self, train_corpus, batch_size):
 
         self._check_import_status()
         self._check_model_status()
 
         # embed documents
-        batch_size = 500
         document_vectors = []
 
-        current = 0
-        batches = int(len(train_corpus) / batch_size)
-        extra = len(train_corpus) % batch_size
+        if (self.embedding_model in use_models) or self.embedding_model == "custom":
 
-        for ind in range(0, batches):
-            document_vectors.append(self.embed(train_corpus[current:current + batch_size]))
-            current += batch_size
+            current = 0
+            batches = int(len(train_corpus) / batch_size)
+            extra = len(train_corpus) % batch_size
 
-        if extra > 0:
-            document_vectors.append(self.embed(train_corpus[current:current + extra]))
+            for ind in range(0, batches):
+                document_vectors.append(self.embed(train_corpus[current:current + batch_size]))
+                current += batch_size
 
-        document_vectors = self._l2_normalize(np.array(np.vstack(document_vectors)))
+            if extra > 0:
+                document_vectors.append(self.embed(train_corpus[current:current + extra]))
+
+            document_vectors = self._l2_normalize(np.array(np.vstack(document_vectors)))
+
+        else:
+            document_vectors = self.embed(train_corpus, batch_size=batch_size)
 
         return document_vectors
 
@@ -549,44 +790,12 @@ class Top2Vec:
 
         return self._l2_normalize(np.array(self.embed([query])[0]))
 
-    def _set_document_vectors(self, document_vectors):
-        if self.embedding_model == 'doc2vec':
-            self.model.docvecs.vectors_docs = document_vectors
-        else:
-            self.document_vectors = document_vectors
-
-    def _get_document_vectors(self, norm=True):
-
-        if self.embedding_model == 'doc2vec':
-
-            if norm:
-                self.model.docvecs.init_sims()
-                return self.model.docvecs.vectors_docs_norm
-            else:
-                return self.model.docvecs.vectors_docs
-        else:
-            return self.document_vectors
-
-    def _index2word(self, index):
-        if self.embedding_model == 'doc2vec':
-            return self.model.wv.index2word[index]
-        else:
-            return self.vocab[index]
-
-    def _get_word_vectors(self):
-        if self.embedding_model == 'doc2vec':
-            self.model.wv.init_sims()
-            return self.model.wv.vectors_norm
-        else:
-            return self.word_vectors
-
     def _create_topic_vectors(self, cluster_labels):
-
         unique_labels = set(cluster_labels)
         if -1 in unique_labels:
             unique_labels.remove(-1)
         self.topic_vectors = self._l2_normalize(
-            np.vstack([self._get_document_vectors(norm=False)[np.where(cluster_labels == label)[0]]
+            np.vstack([self.document_vectors[np.where(cluster_labels == label)[0]]
                       .mean(axis=0) for label in unique_labels]))
 
     def _deduplicate_topics(self):
@@ -704,12 +913,12 @@ class Top2Vec:
         topic_words = []
         topic_word_scores = []
 
-        res = np.inner(topic_vectors, self._get_word_vectors())
+        res = np.inner(topic_vectors, self.word_vectors)
         top_words = np.flip(np.argsort(res, axis=1), axis=1)
         top_scores = np.flip(np.sort(res, axis=1), axis=1)
 
         for words, scores in zip(top_words, top_scores):
-            topic_words.append([self._index2word(i) for i in words[0:50]])
+            topic_words.append([self.vocab[i] for i in words[0:50]])
             topic_word_scores.append(scores[0:50])
 
         topic_words = np.array(topic_words)
@@ -773,17 +982,11 @@ class Top2Vec:
 
     def _words2word_vectors(self, keywords):
 
-        return self._get_word_vectors()[[self._word2index(word) for word in keywords]]
-
-    def _word2index(self, word):
-        if self.embedding_model == 'doc2vec':
-            return self.model.wv.vocab[word].index
-        else:
-            return self.word_indexes[word]
+        return self.word_vectors[[self.word_indexes[word] for word in keywords]]
 
     def _get_combined_vec(self, vecs, vecs_neg):
 
-        combined_vector = np.zeros(self._get_document_vectors().shape[1], dtype=np.float64)
+        combined_vector = np.zeros(self.document_vectors.shape[1], dtype=np.float64)
         for vec in vecs:
             combined_vector += vec
         for vec in vecs_neg:
@@ -819,12 +1022,12 @@ class Top2Vec:
                               "Call index_word_vectors method before setting use_index=True.")
 
     def _check_import_status(self):
-        if self.embedding_model != 'distiluse-base-multilingual-cased':
+        if self.embedding_model in use_models:
             if not _HAVE_TENSORFLOW:
                 raise ImportError(f"{self.embedding_model} is not available.\n\n"
                                   "Try: pip install top2vec[sentence_encoders]\n\n"
                                   "Alternatively try: pip install tensorflow tensorflow_hub tensorflow_text")
-        else:
+        elif self.embedding_model in sbert_models:
             if not _HAVE_TORCH:
                 raise ImportError(f"{self.embedding_model} is not available.\n\n"
                                   "Try: pip install top2vec[sentence_transformers]\n\n"
@@ -835,27 +1038,33 @@ class Top2Vec:
             if self.verbose is False:
                 logger.setLevel(logging.DEBUG)
 
-            if self.embedding_model != "distiluse-base-multilingual-cased":
+            if self.embedding_model in use_models:
                 if self.embedding_model_path is None:
                     logger.info(f'Downloading {self.embedding_model} model')
-                    if self.embedding_model == "universal-sentence-encoder-multilingual":
-                        module = "https://tfhub.dev/google/universal-sentence-encoder-multilingual/3"
-                    else:
-                        module = "https://tfhub.dev/google/universal-sentence-encoder/4"
+                    module = use_model_urls[self.embedding_model]
+
                 else:
                     logger.info(f'Loading {self.embedding_model} model at {self.embedding_model_path}')
                     module = self.embedding_model_path
                 self.embed = hub.load(module)
 
-            else:
+            elif self.embedding_model in sbert_models:
                 if self.embedding_model_path is None:
                     logger.info(f'Downloading {self.embedding_model} model')
-                    module = 'distiluse-base-multilingual-cased'
+                    module = self.embedding_model
                 else:
                     logger.info(f'Loading {self.embedding_model} model at {self.embedding_model_path}')
                     module = self.embedding_model_path
                 model = SentenceTransformer(module)
                 self.embed = model.encode
+
+            elif callable(self.embedding_model):
+                self.embed = self.embedding_model
+                self.embedding_model = "custom"
+
+            elif self.embedding_model == "custom":
+                raise ValueError("Call set_embedding_model method and pass callable"
+                                 " embedding_model used during training.")
 
         if self.verbose is False:
             logger.setLevel(logging.WARNING)
@@ -947,11 +1156,7 @@ class Top2Vec:
         keywords_lower = [keyword.lower() for keyword in keywords]
         keywords_neg_lower = [keyword.lower() for keyword in keywords_neg]
 
-        if self.embedding_model == 'doc2vec':
-            vocab = self.model.wv.vocab
-        else:
-            vocab = self.vocab
-
+        vocab = self.vocab
         for word in keywords_lower + keywords_neg_lower:
             if word not in vocab:
                 raise ValueError(f"'{word}' has not been learned by the model so it cannot be searched.")
@@ -990,7 +1195,7 @@ class Top2Vec:
     def _validate_vector(self, vector):
         if not isinstance(vector, np.ndarray):
             raise ValueError("Vector needs to be a numpy array.")
-        vec_size = self._get_document_vectors().shape[1]
+        vec_size = self.document_vectors.shape[1]
         if not vector.shape[0] == vec_size:
             raise ValueError(f"Vector needs to be of {vec_size} dimensions.")
 
@@ -1021,7 +1226,7 @@ class Top2Vec:
 
         self._check_hnswlib_status()
 
-        document_vectors = self._get_document_vectors()
+        document_vectors = self.document_vectors
         vec_dim = document_vectors.shape[1]
         num_vecs = document_vectors.shape[0]
 
@@ -1061,7 +1266,7 @@ class Top2Vec:
         """
         self._check_hnswlib_status()
 
-        word_vectors = self._get_word_vectors()
+        word_vectors = self.word_vectors
         vec_dim = word_vectors.shape[1]
         num_vecs = word_vectors.shape[0]
 
@@ -1071,6 +1276,23 @@ class Top2Vec:
         self.word_index.init_index(max_elements=num_vecs, ef_construction=ef_construction, M=M)
         self.word_index.add_items(word_vectors, index_ids)
         self.words_indexed = True
+
+    def set_embedding_model(self, embedding_model):
+        """
+        Set the embedding model. This is called after loading a saved Top2Vec
+        model which was trained with a passed callable embedding_model.
+
+        Parameters
+        ----------
+        embedding_model: callable
+            This must be the same embedding model used during training.
+
+        """
+
+        if not callable(embedding_model):
+            raise ValueError("embedding_model must be callable.")
+
+        self.embed = embedding_model
 
     def update_embedding_model_path(self, embedding_model_path):
         """
@@ -1176,7 +1398,7 @@ class Top2Vec:
                 topic_vectors = self.topic_vectors
 
             doc_topics, doc_dist = self._calculate_documents_topic(topic_vectors,
-                                                                   self._get_document_vectors()[doc_indexes],
+                                                                   self.document_vectors[doc_indexes],
                                                                    num_topics=num_topics)
 
             topic_words = np.array([self.topic_words[topics] for topics in doc_topics])
@@ -1184,7 +1406,12 @@ class Top2Vec:
 
         return doc_topics, doc_dist, topic_words, topic_word_scores
 
-    def add_documents(self, documents, doc_ids=None, tokenizer=None, use_embedding_model_tokenizer=False):
+    def add_documents(self,
+                      documents,
+                      doc_ids=None,
+                      tokenizer=None,
+                      use_embedding_model_tokenizer=False,
+                      embedding_batch_size=32):
         """
         Update the model with new documents.
 
@@ -1212,6 +1439,9 @@ class Top2Vec:
         use_embedding_model_tokenizer: bool (Optional, default False)
             If using an embedding model other than doc2vec, use the model's
             tokenizer for document embedding.
+
+        embedding_batch_size: int (default=32)
+            Batch size for documents being embedded.
         """
         # if tokenizer is not passed use default
         if tokenizer is None:
@@ -1245,13 +1475,9 @@ class Top2Vec:
                                                                   alpha=0.025,
                                                                   min_alpha=0.01,
                                                                   epochs=100) for doc in docs_processed])
-            num_docs = len(documents)
-            self.model.docvecs.count += num_docs
-            self.model.docvecs.max_rawint += num_docs
-            self.model.docvecs.vectors_docs_norm = None
-            self._set_document_vectors(np.vstack([self._get_document_vectors(norm=False), document_vectors]))
-            self.model.docvecs.init_sims()
+
             document_vectors = self._l2_normalize(document_vectors)
+            self.document_vectors = np.vstack([self.document_vectors, document_vectors])
 
         else:
             if use_embedding_model_tokenizer:
@@ -1259,8 +1485,8 @@ class Top2Vec:
             else:
                 docs_processed = [tokenizer(doc) for doc in documents]
                 docs_training = [' '.join(doc) for doc in docs_processed]
-            document_vectors = self._embed_documents(docs_training)
-            self._set_document_vectors(np.vstack([self._get_document_vectors(), document_vectors]))
+            document_vectors = self._embed_documents(docs_training, embedding_batch_size)
+            self.document_vectors = np.vstack([self.document_vectors, document_vectors])
 
         # update index
         if self.documents_indexed:
@@ -1334,14 +1560,7 @@ class Top2Vec:
             self.doc_id2index = dict(zip(keys, values))
 
         # delete document vectors
-        self._set_document_vectors(np.delete(self._get_document_vectors(norm=False), doc_indexes, 0))
-
-        if self.embedding_model == 'doc2vec':
-            num_docs = len(doc_indexes)
-            self.model.docvecs.count -= num_docs
-            self.model.docvecs.max_rawint -= num_docs
-            self.model.docvecs.vectors_docs_norm = None
-            self.model.docvecs.init_sims()
+        self.document_vectors = np.delete(self.document_vectors, doc_indexes, 0)
 
         # update topics
         self._unassign_documents_from_topic(doc_indexes, hierarchy=False)
@@ -1527,7 +1746,7 @@ class Top2Vec:
         hierarchy = [[i] for i in range(self.topic_vectors.shape[0])]
 
         count = 0
-        interval = max(int(self._get_document_vectors().shape[0] / 50000), 1)
+        interval = max(int(self.document_vectors.shape[0] / 50000), 1)
 
         while num_topics_current > num_topics:
 
@@ -1560,7 +1779,7 @@ class Top2Vec:
             # update topics sizes
             if count % interval == 0:
                 doc_top = self._calculate_documents_topic(topic_vectors=top_vecs,
-                                                          document_vectors=self._get_document_vectors(),
+                                                          document_vectors=self.document_vectors,
                                                           dist=False)
                 topic_sizes = pd.Series(doc_top).value_counts()
                 top_sizes = [topic_sizes[i] for i in range(0, len(topic_sizes))]
@@ -1588,9 +1807,9 @@ class Top2Vec:
 
         # re-calculate topic vectors from clusters
         doc_top = self._calculate_documents_topic(topic_vectors=top_vecs,
-                                                  document_vectors=self._get_document_vectors(),
+                                                  document_vectors=self.document_vectors,
                                                   dist=False)
-        self.topic_vectors_reduced = self._l2_normalize(np.vstack([self._get_document_vectors()
+        self.topic_vectors_reduced = self._l2_normalize(np.vstack([self.document_vectors
                                                                    [np.where(doc_top == label)[0]]
                                                                   .mean(axis=0) for label in set(doc_top)]))
 
@@ -1598,7 +1817,7 @@ class Top2Vec:
 
         # assign documents to topic
         self.doc_top_reduced, self.doc_dist_reduced = self._calculate_documents_topic(self.topic_vectors_reduced,
-                                                                                      self._get_document_vectors())
+                                                                                      self.document_vectors)
         # find topic words and scores
         self.topic_words_reduced, self.topic_word_scores_reduced = self._find_topic_words_and_scores(
             topic_vectors=self.topic_vectors_reduced)
@@ -1831,7 +2050,7 @@ class Top2Vec:
             doc_scores = np.array([1 - score for score in doc_scores])
             doc_indexes = self._get_document_indexes(doc_ids)
         else:
-            doc_indexes, doc_scores = self._search_vectors_by_vector(self._get_document_vectors(),
+            doc_indexes, doc_scores = self._search_vectors_by_vector(self.document_vectors,
                                                                      vector, num_docs)
             doc_ids = self._get_document_ids(doc_indexes)
 
@@ -1897,10 +2116,10 @@ class Top2Vec:
             word_scores = np.array([1 - score for score in word_scores])
 
         else:
-            word_indexes, word_scores = self._search_vectors_by_vector(self._get_word_vectors(),
+            word_indexes, word_scores = self._search_vectors_by_vector(self.word_vectors,
                                                                        vector, num_words)
 
-        words = np.array([self._index2word(index) for index in word_indexes])
+        words = np.array([self.vocab[index] for index in word_indexes])
 
         return words, word_scores
 
@@ -2123,7 +2342,7 @@ class Top2Vec:
             doc_scores = np.array([doc[1] for doc in sim_docs])
         else:
             combined_vector = self._get_combined_vec(word_vecs, neg_word_vecs)
-            doc_indexes, doc_scores = self._search_vectors_by_vector(self._get_document_vectors(),
+            doc_indexes, doc_scores = self._search_vectors_by_vector(self.document_vectors,
                                                                      combined_vector, num_docs)
 
         doc_ids = self._get_document_ids(doc_indexes)
@@ -2187,7 +2406,7 @@ class Top2Vec:
         neg_word_vecs = self._words2word_vectors(keywords_neg)
         combined_vector = self._get_combined_vec(word_vecs, neg_word_vecs)
 
-        num_res = min(num_words + len(keywords) + len(keywords_neg), self._get_word_vectors().shape[0])
+        num_res = min(num_words + len(keywords) + len(keywords_neg), self.word_vectors.shape[0])
 
         # if use_index:
         words, word_scores = self.search_words_by_vector(vector=combined_vector,
@@ -2335,7 +2554,7 @@ class Top2Vec:
 
         if use_index:
             self._check_document_index_status()
-            document_vectors = self._get_document_vectors()
+            document_vectors = self.document_vectors
             doc_vecs = [document_vectors[ind] for ind in doc_indexes]
             doc_vecs_neg = [document_vectors[ind] for ind in doc_indexes_neg]
             combined_vector = self._get_combined_vec(doc_vecs, doc_vecs_neg)
@@ -2354,11 +2573,11 @@ class Top2Vec:
             combined_vector = self._get_combined_vec(doc_vecs, doc_vecs_neg)
 
             num_res = min(num_docs + len(doc_indexes) + len(doc_indexes_neg),
-                          self._get_document_vectors().shape[0])
+                          self.document_vectors.shape[0])
 
             # don't return documents that were searched
             search_doc_indexes = list(doc_indexes) + list(doc_indexes_neg)
-            doc_indexes, doc_scores = self._search_vectors_by_vector(self._get_document_vectors(),
+            doc_indexes, doc_scores = self._search_vectors_by_vector(self.document_vectors,
                                                                      combined_vector, num_res)
             res_indexes = [index for index, doc_ind in enumerate(doc_indexes)
                            if doc_ind not in search_doc_indexes][:num_docs]
